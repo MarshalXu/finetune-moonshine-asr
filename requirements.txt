@@ -15,7 +15,7 @@ peft>=0.10.0  # LoRA/PEFT fine-tuning
 librosa>=0.10.0
 soundfile>=0.12.0
 torchaudio>=2.0.0
-torchcodec>=0.14.0  # Required by datasets.Audio decoding
+# torchcodec>=0.14.0  # Optional: datasets.Audio decoding; Colab path uses soundfile
 
 # Data handling
 pyyaml>=6.0

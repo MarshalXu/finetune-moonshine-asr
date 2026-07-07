@@ -59,7 +59,18 @@ def parse_args():
     parser.add_argument(
         "--validate-audio",
         action="store_true",
-        help="Decode every audio file with torchcodec before saving it.",
+        help="Decode every audio file before saving it.",
+    )
+    parser.add_argument(
+        "--validation-backend",
+        choices=["soundfile", "torchcodec"],
+        default="soundfile",
+        help="Audio backend for --validate-audio.",
+    )
+    parser.add_argument(
+        "--no-cast-audio",
+        action="store_true",
+        help="Store audio paths as plain strings instead of datasets.Audio.",
     )
     parser.add_argument(
         "--skip-invalid-audio",
@@ -94,12 +105,20 @@ def resolve_audio_path(raw_path, manifest_dir, data_root):
     )
 
 
-def validate_audio(path):
-    from torchcodec.decoders import AudioDecoder
+def validate_audio(path, backend="soundfile"):
+    if backend == "torchcodec":
+        from torchcodec.decoders import AudioDecoder
 
-    samples = AudioDecoder(str(path)).get_all_samples()
-    if samples.data.numel() == 0:
-        raise ValueError("decoded audio has zero samples")
+        samples = AudioDecoder(str(path)).get_all_samples()
+        if samples.data.numel() == 0:
+            raise ValueError("decoded audio has zero samples")
+        return
+
+    import soundfile as sf
+
+    info = sf.info(str(path))
+    if info.frames <= 0:
+        raise ValueError("decoded audio has zero frames")
 
 
 def load_manifest(
@@ -110,6 +129,8 @@ def load_manifest(
     sampling_rate,
     validate_audio_files=False,
     skip_invalid_audio=False,
+    validation_backend="soundfile",
+    no_cast_audio=False,
 ):
     rows = []
     skipped = 0
@@ -137,7 +158,7 @@ def load_manifest(
             resolved_audio = resolve_audio_path(audio["path"], manifest_dir, data_root)
             if validate_audio_files:
                 try:
-                    validate_audio(resolved_audio)
+                    validate_audio(resolved_audio, backend=validation_backend)
                 except Exception as exc:
                     message = f"{path}:{index + 1} invalid audio {resolved_audio}: {exc}"
                     if skip_invalid_audio:
@@ -162,6 +183,8 @@ def load_manifest(
 
     print(f"{path.name}: loaded {len(rows):,} rows, skipped {skipped:,} invalid rows")
     dataset = Dataset.from_list(rows)
+    if no_cast_audio:
+        return dataset
     return dataset.cast_column("audio", Audio(sampling_rate=sampling_rate))
 
 
@@ -197,6 +220,8 @@ def main():
                 args.sampling_rate,
                 validate_audio_files=args.validate_audio,
                 skip_invalid_audio=args.skip_invalid_audio,
+                validation_backend=args.validation_backend,
+                no_cast_audio=args.no_cast_audio,
             ),
             "test": load_manifest(
                 test_manifest,
@@ -206,6 +231,8 @@ def main():
                 args.sampling_rate,
                 validate_audio_files=args.validate_audio,
                 skip_invalid_audio=args.skip_invalid_audio,
+                validation_backend=args.validation_backend,
+                no_cast_audio=args.no_cast_audio,
             ),
         }
     )

@@ -11,6 +11,9 @@ Supports:
 from datasets import load_dataset, DatasetDict, Dataset, Audio, load_from_disk
 from typing import Optional, Union, Dict, Any
 import pandas as pd
+import numpy as np
+import soundfile as sf
+import librosa
 from pathlib import Path
 
 
@@ -341,8 +344,10 @@ class MoonshineDataLoader:
                 "Please create train/test split before saving to disk."
             )
 
-        # Cast audio to target sampling rate if needed
-        if "audio" in dataset["train"].column_names:
+        # Cast audio to target sampling rate if needed. Colab can disable this
+        # to avoid datasets.Audio -> torchcodec decoding incompatibilities.
+        dataset_config = self.config.get("dataset", {})
+        if "audio" in dataset["train"].column_names and dataset_config.get("cast_audio", True):
             dataset = dataset.cast_column(
                 "audio",
                 Audio(sampling_rate=self.sampling_rate)
@@ -413,6 +418,28 @@ class MoonshineDataLoader:
         else:
             raise ValueError(f"Unknown dataset type: {dataset_type}")
 
+
+    def _load_audio_value(self, audio):
+        """Return an audio dict with array and sampling_rate from decoded audio or a path."""
+        if isinstance(audio, dict) and "array" in audio and "sampling_rate" in audio:
+            return audio
+
+        if isinstance(audio, dict) and "path" in audio:
+            audio_path = audio["path"]
+        elif isinstance(audio, (str, Path)):
+            audio_path = audio
+        else:
+            raise TypeError(f"Unsupported audio value: {type(audio)}")
+
+        array, sampling_rate = sf.read(str(audio_path), dtype="float32", always_2d=False)
+        if array.ndim > 1:
+            array = np.mean(array, axis=1)
+        if sampling_rate != self.sampling_rate:
+            array = librosa.resample(array, orig_sr=sampling_rate, target_sr=self.sampling_rate)
+            sampling_rate = self.sampling_rate
+
+        return {"array": array, "sampling_rate": sampling_rate, "path": str(audio_path)}
+
     def prepare_dataset(
         self,
         dataset: Dataset,
@@ -432,7 +459,7 @@ class MoonshineDataLoader:
         """
         def prepare_example(batch):
             # Process audio
-            audio = batch["audio"]
+            audio = self._load_audio_value(batch["audio"])
 
             inputs = processor(
                 audio["array"],
