@@ -23,6 +23,7 @@ Examples:
 """
 
 import argparse
+import inspect
 import yaml
 import os
 from pathlib import Path
@@ -228,6 +229,50 @@ class MoonshineSeq2SeqTrainer(Seq2SeqTrainer):
             labels = labels.detach()
 
         return (loss, generated_tokens, labels)
+
+
+def apply_peft_if_enabled(model, config):
+    """Wrap the model with LoRA adapters when peft.enabled is true."""
+    peft_config = config.get('peft', {}) or {}
+    if not peft_config.get('enabled', False):
+        return model
+
+    try:
+        from peft import LoraConfig, TaskType, get_peft_model
+    except ImportError as exc:
+        raise ImportError(
+            "LoRA training requires peft. Install it with: "
+            "python -m pip install peft"
+        ) from exc
+
+    target_modules = peft_config.get(
+        'target_modules',
+        ['q_proj', 'v_proj', 'k_proj', 'o_proj'],
+    )
+    lora_kwargs = {
+        'inference_mode': False,
+        'r': peft_config.get('r', 8),
+        'lora_alpha': peft_config.get('lora_alpha', 16),
+        'lora_dropout': peft_config.get('lora_dropout', 0.05),
+        'target_modules': target_modules,
+        'bias': peft_config.get('bias', 'none'),
+    }
+    task_type = peft_config.get('task_type')
+    if task_type:
+        lora_kwargs['task_type'] = getattr(TaskType, task_type)
+
+    lora_config = LoraConfig(**lora_kwargs)
+
+    model = get_peft_model(model, lora_config)
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in model.parameters())
+    print("\n[OK] LoRA enabled")
+    print(f"  Target modules: {target_modules}")
+    print(f"  Rank: {lora_config.r}")
+    print(f"  Alpha: {lora_config.lora_alpha}")
+    print(f"  Dropout: {lora_config.lora_dropout}")
+    print(f"  Trainable: {trainable:,} / {total:,} ({100 * trainable / total:.2f}%)")
+    return model
 
 
 def main():
@@ -448,15 +493,17 @@ def main():
         print(f"  Num beams: {model.generation_config.num_beams}")
         print(f"  No repeat ngram size: {model.generation_config.no_repeat_ngram_size}")
 
+    model = apply_peft_if_enabled(model, config)
+
     # Freeze encoder if specified
-    if config['model'].get('freeze_encoder', False):
+    if config['model'].get('freeze_encoder', False) and not config.get('peft', {}).get('enabled', False):
         print("\n[WARNING] Freezing encoder weights (decoder-only training)")
         for param in model.encoder.parameters():
             param.requires_grad = False
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         total = model.num_parameters()
         print(f"  Trainable: {trainable:,} / {total:,} ({100*trainable/total:.1f}%)")
-    else:
+    elif not config.get('peft', {}).get('enabled', False):
         print(f"\n[OK] Model loaded: {model.num_parameters():,} parameters")
 
     # ============================================
@@ -472,6 +519,7 @@ def main():
     # Evaluation Metrics
     # ============================================
     wer_metric = evaluate.load('wer')
+    cer_metric = evaluate.load('cer')
 
     def compute_metrics(pred):
         pred_ids = pred.predictions
@@ -502,6 +550,16 @@ def main():
 
         avg_wer = np.mean(wer_scores)
 
+        cer_scores = np.ones(len(pred_str))
+        cer_scores[pred_empty & label_empty] = 0
+        if np.any(non_silence):
+            non_silence_cer = cer_metric.compute(
+                predictions=np.array(pred_str)[non_silence].tolist(),
+                references=np.array(label_str)[non_silence].tolist()
+            )
+            cer_scores[non_silence] = non_silence_cer
+        avg_cer = np.mean(cer_scores)
+
         # Log examples
         print("\n" + "="*80)
         print(f"EVALUATION EXAMPLES (Phase {args.phase if config['curriculum']['enabled'] else 'Full'}):")
@@ -512,7 +570,7 @@ def main():
             print(f"  Reference:  '{label_str[i]}'")
         print("="*80)
 
-        return {"wer": 100 * avg_wer}
+        return {"wer": 100 * avg_wer, "cer": 100 * avg_cer}
 
     # ============================================
     # Training Arguments
@@ -522,6 +580,10 @@ def main():
     # Override with phase-specific and CLI args
     max_steps = args.max_steps or phase.max_steps
     learning_rate = phase.learning_rate
+
+    training_args_compat = {}
+    if "group_by_length" in inspect.signature(Seq2SeqTrainingArguments.__init__).parameters:
+        training_args_compat["group_by_length"] = train_config["group_by_length"]
 
     training_args = Seq2SeqTrainingArguments(
         output_dir=output_dir,
@@ -538,11 +600,12 @@ def main():
         warmup_steps=train_config.get('warmup_steps', phase.warmup_steps),  # Allow override from config
         max_grad_norm=train_config['max_grad_norm'],
         max_steps=max_steps,
+        num_train_epochs=train_config.get('num_train_epochs', 3),
         label_smoothing_factor=phase.label_smoothing,
 
         # Length bucketing (paper recommendation: groups similar-length audio)
-        group_by_length=train_config['group_by_length'],
         length_column_name=train_config['length_column_name'],
+        **training_args_compat,
 
         # Memory optimization
         gradient_checkpointing=train_config['gradient_checkpointing'],
@@ -551,8 +614,10 @@ def main():
 
         # Evaluation
         eval_strategy=train_config['eval_strategy'],
-        eval_steps=train_config['eval_steps'],
-        save_steps=train_config['save_steps'],
+        eval_steps=train_config.get('eval_steps'),
+        save_strategy=train_config.get('save_strategy', 'steps'),
+        save_steps=train_config.get('save_steps'),
+        save_total_limit=train_config.get('save_total_limit'),
         logging_steps=train_config['logging_steps'],
         predict_with_generate=train_config['predict_with_generate'],
 

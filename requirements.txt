@@ -9,6 +9,7 @@ evaluate>=0.4.0
 jiwer>=3.0.0
 tensorboard>=2.14.0
 schedulefree>=1.4.0  # Schedule-free AdamW optimizer
+peft>=0.10.0  # LoRA/PEFT fine-tuning
 
 # Audio processing
 librosa>=0.10.0
