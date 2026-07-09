@@ -446,20 +446,26 @@ def main():
     print("PREPROCESSING DATASETS")
     print(f"{'='*60}")
 
-    dataset_dict['train'] = data_loader.prepare_dataset(
-        dataset_dict['train'],
-        processor
-    )
-    dataset_dict['test'] = data_loader.prepare_dataset(
-        dataset_dict['test'],
-        processor
-    )
-
-    # Save encoded datasets
     encoded_path = f'{output_dir}_encoded'
-    os.makedirs(encoded_path, exist_ok=True)
-    dataset_dict.save_to_disk(encoded_path)
-    print(f"\n[OK] Saved encoded datasets to: {encoded_path}")
+    from datasets import load_from_disk
+    if os.path.exists(encoded_path) and os.path.exists(os.path.join(encoded_path, 'dataset_dict.json')):
+        print(f"\n[OK] Found existing preprocessed dataset at: {encoded_path}")
+        print("Loading preprocessed dataset directly to save time and disk space...")
+        dataset_dict = load_from_disk(encoded_path)
+    else:
+        dataset_dict['train'] = data_loader.prepare_dataset(
+            dataset_dict['train'],
+            processor
+        )
+        dataset_dict['test'] = data_loader.prepare_dataset(
+            dataset_dict['test'],
+            processor
+        )
+
+        # Save encoded datasets
+        os.makedirs(encoded_path, exist_ok=True)
+        dataset_dict.save_to_disk(encoded_path)
+        print(f"\n[OK] Saved encoded datasets to: {encoded_path}")
 
     print(f"\nFinal dataset sizes:")
     print(f"  Train: {len(dataset_dict['train']):,} samples")
