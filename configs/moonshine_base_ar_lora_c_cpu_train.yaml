@@ -1,0 +1,87 @@
+# C-plan LoRA fine-tune config for Arabic Moonshine telephone-recording data.
+# Compared with the B plan, this targets attention projections plus FFN layers.
+# In Colab, set base_config_path to this file and keep the notebook GPU overrides.
+
+model:
+  name: "UsefulSensors/moonshine-base-ar"
+  freeze_encoder: false
+
+peft:
+  enabled: true
+  r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  bias: "none"
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "fc1"
+    - "fc2"
+
+dataset:
+  type: "local"
+  path: "./datasets/whisper_ar_manifist0508_hf"
+  text_column: "sentence"
+
+audio:
+  sampling_rate: 16000
+  max_duration: 20.0
+  min_duration: 0.5
+
+preprocessing:
+  num_proc: null
+  normalize_audio: false
+
+curriculum:
+  enabled: false
+
+training:
+  output_dir: "./results-moonshine-base-ar-lora-c-cpu"
+
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 8
+  gradient_checkpointing: false
+  fp16: false
+  fp16_full_eval: false
+  group_by_length: true
+  length_column_name: "input_length"
+  max_grad_norm: 1.0
+
+  num_train_epochs: 6
+  max_steps: -1
+  optim: "adamw_torch"
+  learning_rate: 5.0e-5
+  lr_scheduler_type: "linear"
+  warmup_steps: 100
+
+  eval_strategy: "epoch"
+  eval_steps: null
+  save_strategy: "epoch"
+  save_steps: null
+  save_total_limit: 3
+  logging_steps: 10
+  predict_with_generate: true
+
+  load_best_model_at_end: true
+  metric_for_best_model: "wer"
+  greater_is_better: false
+
+  report_to: []
+  logging_dir: "./logs/moonshine-base-ar-lora-c-cpu"
+
+  push_to_hub: false
+  hub_model_id: null
+  hub_strategy: "every_save"
+  hub_token: null
+
+generation:
+  max_new_tokens: 50
+  length_penalty: 1.2
+  do_sample: false
+  early_stopping: true
+  repetition_penalty: 1.1
+  num_beams: 1
+  no_repeat_ngram_size: 0
