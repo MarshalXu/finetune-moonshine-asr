@@ -705,7 +705,8 @@ def main():
             print(f"\n⚠️  Final evaluation skipped due to dtype mismatch (this is a known issue with FP16 training)")
             print(f"Your model was saved successfully to: {training_args.output_dir}/final")
             print(f"\nYou can evaluate it separately with:")
-            print(f"  python scripts/evaluate.py --model {training_args.output_dir}/final --dataset {config['dataset']['name']} --split test")
+            dataset_name_or_path = config['dataset'].get('name') or config['dataset'].get('path') or 'dataset'
+            print(f"  python scripts/evaluate.py --model {training_args.output_dir}/final --dataset {dataset_name_or_path} --split test")
             results = None
         else:
             raise
