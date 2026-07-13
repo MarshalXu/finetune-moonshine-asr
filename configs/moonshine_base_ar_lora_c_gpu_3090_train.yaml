@@ -24,6 +24,10 @@ dataset:
   type: "local"
   path: "./datasets/whisper_ar_manifist0508_hf"
   text_column: "sentence"
+  cast_audio: false
+  encoded_cache_dir: "./datasets/whisper_ar_manifist0508_hf_encoded_16k_0p5_20s"
+  reuse_encoded_cache: true
+  overwrite_encoded_cache: false
 
 audio:
   sampling_rate: 16000

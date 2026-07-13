@@ -24,6 +24,8 @@ Examples:
 
 import argparse
 import inspect
+import json
+import shutil
 import yaml
 import os
 from pathlib import Path
@@ -31,6 +33,7 @@ from pathlib import Path
 import torch
 import numpy as np
 import evaluate
+from datasets import load_from_disk
 from transformers import (
     AutoProcessor,
     MoonshineForConditionalGeneration,
@@ -98,8 +101,92 @@ Examples:
         action='store_true',
         help='Test mode: use only 100 samples for quick validation'
     )
+    parser.add_argument(
+        '--rebuild-encoded-cache',
+        action='store_true',
+        help='Force rebuilding the encoded dataset cache before training'
+    )
 
     return parser.parse_args()
+
+
+def build_encoded_cache_metadata(config, args, model_name, phase):
+    """Capture preprocessing settings that affect encoded dataset contents."""
+    dataset_config = config.get('dataset', {})
+    audio_config = config.get('audio', {})
+    preprocessing_config = config.get('preprocessing', {})
+    curriculum_config = config.get('curriculum', {})
+
+    return {
+        "version": 1,
+        "model_name": model_name,
+        "dataset": {
+            "type": dataset_config.get("type"),
+            "path": dataset_config.get("path"),
+            "text_column": dataset_config.get("text_column", "transcript"),
+            "cast_audio": dataset_config.get("cast_audio", True),
+        },
+        "audio": {
+            "sampling_rate": audio_config.get("sampling_rate", 16000),
+            "min_duration": audio_config.get("min_duration", 1.0),
+            "max_duration": audio_config.get("max_duration", 30.0),
+        },
+        "preprocessing": {
+            "normalize_audio": preprocessing_config.get("normalize_audio", False),
+        },
+        "curriculum": {
+            "enabled": curriculum_config.get("enabled", True),
+            "phase": args.phase if curriculum_config.get("enabled", True) else None,
+            "phase_name": phase.name,
+            "min_duration": phase.min_duration,
+            "max_duration": phase.max_duration,
+            "max_words": phase.max_words,
+        },
+        "test_mode": args.test_mode,
+    }
+
+
+def metadata_path_for(encoded_path):
+    return Path(encoded_path) / "_metadata.json"
+
+
+def metadata_matches(encoded_path, expected_metadata):
+    path = metadata_path_for(encoded_path)
+    if not path.exists():
+        return False, "metadata file missing"
+
+    try:
+        actual_metadata = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        return False, f"metadata is invalid JSON: {exc}"
+
+    if actual_metadata != expected_metadata:
+        return False, "metadata mismatch"
+
+    return True, "metadata matches"
+
+
+def save_encoded_cache_metadata(encoded_path, metadata):
+    path = metadata_path_for(encoded_path)
+    path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
+
+
+def save_encoded_dataset_cache(dataset_dict, encoded_path, metadata):
+    """Write encoded cache through a temp directory before replacing the target."""
+    target = Path(encoded_path)
+    tmp = target.with_name(f"{target.name}.tmp")
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    if tmp.exists():
+        shutil.rmtree(tmp)
+
+    dataset_dict.save_to_disk(str(tmp))
+    save_encoded_cache_metadata(tmp, metadata)
+
+    if target.exists():
+        shutil.rmtree(target)
+
+    tmp.rename(target)
 
 
 # ============================================
@@ -446,20 +533,44 @@ def main():
     print("PREPROCESSING DATASETS")
     print(f"{'='*60}")
 
-    dataset_dict['train'] = data_loader.prepare_dataset(
-        dataset_dict['train'],
-        processor
+    dataset_config = config.get('dataset', {})
+    encoded_path = dataset_config.get('encoded_cache_dir') or f'{output_dir}_encoded'
+    reuse_encoded_cache = dataset_config.get('reuse_encoded_cache', True)
+    overwrite_encoded_cache = (
+        dataset_config.get('overwrite_encoded_cache', False)
+        or args.rebuild_encoded_cache
     )
-    dataset_dict['test'] = data_loader.prepare_dataset(
-        dataset_dict['test'],
-        processor
-    )
+    expected_cache_metadata = build_encoded_cache_metadata(config, args, model_name, phase)
 
-    # Save encoded datasets
-    encoded_path = f'{output_dir}_encoded'
-    os.makedirs(encoded_path, exist_ok=True)
-    dataset_dict.save_to_disk(encoded_path)
-    print(f"\n[OK] Saved encoded datasets to: {encoded_path}")
+    use_existing_cache = False
+    if reuse_encoded_cache and not overwrite_encoded_cache and os.path.isdir(encoded_path):
+        matches, reason = metadata_matches(encoded_path, expected_cache_metadata)
+        if matches:
+            use_existing_cache = True
+            print(f"\n[OK] Reusing encoded dataset cache: {encoded_path}")
+        else:
+            print(f"\n[WARNING] Encoded cache not reused: {reason}")
+            print(f"  Cache path: {encoded_path}")
+            print("  Rebuilding encoded dataset cache.")
+    elif overwrite_encoded_cache:
+        print(f"\n[OK] Rebuilding encoded dataset cache: {encoded_path}")
+    else:
+        print(f"\n[OK] Encoded dataset cache not found. Building: {encoded_path}")
+
+    if use_existing_cache:
+        dataset_dict = load_from_disk(encoded_path)
+    else:
+        dataset_dict['train'] = data_loader.prepare_dataset(
+            dataset_dict['train'],
+            processor
+        )
+        dataset_dict['test'] = data_loader.prepare_dataset(
+            dataset_dict['test'],
+            processor
+        )
+
+        save_encoded_dataset_cache(dataset_dict, encoded_path, expected_cache_metadata)
+        print(f"\n[OK] Saved encoded datasets to: {encoded_path}")
 
     print(f"\nFinal dataset sizes:")
     print(f"  Train: {len(dataset_dict['train']):,} samples")
